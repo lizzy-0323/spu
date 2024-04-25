@@ -1086,6 +1086,8 @@ public:
         old_attr.getOutputFeatureDimension(),
         old_attr.getOutputSpatialDimensions());
 
+    SPU_ENFORCE(op.getFeatureGroupCount() == 1 && op.getBatchGroupCount() == 1);
+
     Type result_type = convertResultType(op.getResult());
 
     auto operands = materializeInputs(op, adaptor.getOperands());
@@ -1123,12 +1125,10 @@ public:
     if (op.getWindowStrides().has_value()) {
       rewriter.replaceOpWithNewOp<pphlo::ConvolutionOp>(
           op, result_type, lhs, rhs,
-          DenseI64ArrayAttr::get(getContext(), *op.getWindowStrides()), attr,
-          op.getFeatureGroupCount(), op.getBatchGroupCount());
+          DenseI64ArrayAttr::get(getContext(), *op.getWindowStrides()), attr);
     } else {
-      rewriter.replaceOpWithNewOp<pphlo::ConvolutionOp>(
-          op, result_type, lhs, rhs, nullptr, attr, op.getFeatureGroupCount(),
-          op.getBatchGroupCount());
+      rewriter.replaceOpWithNewOp<pphlo::ConvolutionOp>(op, result_type, lhs,
+                                                        rhs, nullptr, attr);
     }
 
     return success();
@@ -1210,6 +1210,52 @@ public:
     rewriter.replaceOpWithNewOp<pphlo::ConcatenateOp>(
         op, result_type, materializeInputs(op, adaptor.getOperands()),
         op.getDimension());
+
+    return success();
+  }
+};
+
+template <>
+class HloToPPHloOpConverter<stablehlo::GatherOp>
+    : public OpConversionPattern<stablehlo::GatherOp>, BasePPHloOpConverter {
+
+public:
+  HloToPPHloOpConverter(TypeConverter &type_converter, MLIRContext *context,
+                        const ValueVisibilityMap &vis)
+      : OpConversionPattern<stablehlo::GatherOp>(type_converter, context),
+        BasePPHloOpConverter(context, vis, type_converter) {}
+
+  LogicalResult
+  matchAndRewrite(stablehlo::GatherOp op, stablehlo::GatherOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto old_attr = op.getDimensionNumbers();
+    auto result_vis = vis_.getValueVisibility(op.getResult());
+    Type resultType = typetools_.getType(
+        this->getTypeConverter()->convertType(op.getType()), result_vis);
+    auto materialized_operands = materializeInputs(op, adaptor.getOperands());
+
+    auto call = rewriter.create<pphlo::CustomCallOp>(
+        op->getLoc(), resultType, materialized_operands, "pphlo.gather");
+    auto attr = DictionaryAttr::get(
+        op->getContext(),
+        {NamedAttribute(
+             rewriter.getStringAttr("slice_sizes"),
+             DenseI64ArrayAttr::get(op->getContext(), op.getSliceSizes())),
+         NamedAttribute(rewriter.getStringAttr("offset_dims"),
+                        DenseI64ArrayAttr::get(op->getContext(),
+                                               old_attr.getOffsetDims())),
+         NamedAttribute(
+             rewriter.getStringAttr("collapsed_slice_dims"),
+             DenseI64ArrayAttr::get(op->getContext(),
+                                    old_attr.getCollapsedSliceDims())),
+         NamedAttribute(
+             rewriter.getStringAttr("index_vector_dim"),
+             rewriter.getI64IntegerAttr(old_attr.getIndexVectorDim())),
+         NamedAttribute(rewriter.getStringAttr("start_index_map"),
+                        DenseI64ArrayAttr::get(op->getContext(),
+                                               old_attr.getStartIndexMap()))});
+    call->setAttr("pphlo.attributes", attr);
+    rewriter.replaceOp(op, call);
 
     return success();
   }
@@ -1308,6 +1354,7 @@ private:
                     HloToPPHloOpConverter<stablehlo::ExpOp>,
                     HloToPPHloOpConverter<stablehlo::Expm1Op>,
                     HloToPPHloOpConverter<stablehlo::FloorOp>,
+                    HloToPPHloOpConverter<stablehlo::GatherOp>,
                     HloToPPHloOpConverter<stablehlo::IfOp>,
                     HloToPPHloOpConverter<stablehlo::ImagOp>,
                     HloToPPHloOpConverter<stablehlo::IotaOp>,
